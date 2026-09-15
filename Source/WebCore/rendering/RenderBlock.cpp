@@ -397,6 +397,9 @@ bool RenderBlock::isSelfCollapsingBlock() const
             [&](const Style::PreferredSize::Calc&) {
                 return true;
             },
+            [&](const Style::PreferredSize::CalcSize&) {
+                return true;
+            },
             [](const CSS::Keyword::Stretch&) {
                 return true;
             },
@@ -433,6 +436,9 @@ bool RenderBlock::isSelfCollapsingBlock() const
                 return handleNonZeroPercentageOrCalc();
             },
             [&](const Style::PreferredSize::Calc&) {
+                return handleNonZeroPercentageOrCalc();
+            },
+            [&](const Style::PreferredSize::CalcSize&) {
                 return handleNonZeroPercentageOrCalc();
             },
             [](const CSS::Keyword::Auto&) {
@@ -2696,11 +2702,6 @@ void RenderBlock::setPageLogicalOffset(LayoutUnit logicalOffset)
         rareData = &ensureBlockRareData();
     }
     rareData->m_pageLogicalOffset = logicalOffset;
-}
-
-void RenderBlock::boundingRects(Vector<LayoutRect>& rects, const LayoutPoint& accumulatedOffset) const
-{
-    rects.append({ accumulatedOffset, borderBoxSize() });
 }
 
 void RenderBlock::absoluteQuads(Vector<FloatQuad>& quads, bool* wasFixed) const

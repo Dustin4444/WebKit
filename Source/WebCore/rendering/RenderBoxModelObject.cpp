@@ -43,9 +43,11 @@
 #include "InlineIteratorInlineBox.h"
 #include "LayoutIntegrationLineLayout.h"
 #include "LegacyInlineFlowBox.h"
+#include "LegacyRootInlineBox.h"
 #include "LocalFrame.h"
 #include "LocalFrameView.h"
 #include "Path.h"
+#include "PositionedLayoutConstraints.h"
 #include "RenderBlock.h"
 #include "RenderBoxInlines.h"
 #include "RenderBoxModelObjectInlines.h"
@@ -480,16 +482,16 @@ LayoutPoint RenderBoxModelObject::adjustedPositionRelativeToOffsetParent(const L
     if (const RenderBoxModelObject* offsetParent = this->offsetParent()) {
         if (auto* renderBox = dynamicDowncast<RenderBox>(*offsetParent); renderBox && !offsetParent->isBody() && !is<RenderTable>(*offsetParent))
             referencePoint.move(-renderBox->borderLeft(), -renderBox->borderTop());
-        else if (auto* renderInline = dynamicDowncast<RenderInline>(*offsetParent)) {
+        else if (offsetParent->isInlineBox()) {
             // Inside inline formatting context both inflow and statically positioned out-of-flow boxes are positioned relative to the root block container.
-            auto topLeft = renderInline->firstInlineBoxTopLeft();
+            auto topLeft = offsetParent->firstFragmentBorderBoxRect().location();
             if (isOutOfFlowPositioned()) {
                 auto& outOfFlowStyle = style();
                 ASSERT(containingBlock());
                 auto isHorizontalWritingMode = !containingBlock() || containingBlock()->writingMode().isHorizontal();
-                if (!outOfFlowStyle.hasStaticInlinePosition(isHorizontalWritingMode))
+                if (!PositionedLayoutConstraints::usesStaticPosition(outOfFlowStyle, LogicalBoxAxis::Inline, isHorizontalWritingMode))
                     topLeft.setX(LayoutUnit { });
-                if (!outOfFlowStyle.hasStaticBlockPosition(isHorizontalWritingMode))
+                if (!PositionedLayoutConstraints::usesStaticPosition(outOfFlowStyle, LogicalBoxAxis::Block, isHorizontalWritingMode))
                     topLeft.setY(LayoutUnit { });
             }
             referencePoint.move(-topLeft.x(), -topLeft.y());
@@ -719,16 +721,12 @@ LayoutSize RenderBoxModelObject::offsetForInFlowPosition() const
 
 LayoutUnit RenderBoxModelObject::offsetLeft() const
 {
-    // Note that RenderInline and RenderBox override this to pass a different
-    // startPoint to adjustedPositionRelativeToOffsetParent.
-    return adjustedPositionRelativeToOffsetParent(LayoutPoint()).x();
+    return adjustedPositionRelativeToOffsetParent(firstFragmentBorderBoxRect().location()).x();
 }
 
 LayoutUnit RenderBoxModelObject::offsetTop() const
 {
-    // Note that RenderInline and RenderBox override this to pass a different
-    // startPoint to adjustedPositionRelativeToOffsetParent.
-    return adjustedPositionRelativeToOffsetParent(LayoutPoint()).y();
+    return adjustedPositionRelativeToOffsetParent(firstFragmentBorderBoxRect().location()).y();
 }
 
 InterpolationQuality RenderBoxModelObject::chooseInterpolationQuality(GraphicsContext& context, Image& image, const void* layer, const LayoutSize& size) const
@@ -1078,6 +1076,15 @@ LayoutUnit RenderBoxModelObject::marginEnd(const WritingMode writingMode) const
     return computedCSSMarginEnd(writingMode);
 }
 
+LayoutRect RenderBoxModelObject::firstFragmentBorderBoxRect() const
+{
+    if (auto* lineLayout = LayoutIntegration::LineLayout::containing(*this))
+        return lineLayout->firstInlineBoxRect(*this);
+    if (auto* inlineBox = firstLegacyInlineBoxFor(*this))
+        return { flooredLayoutPoint(inlineBox->locationIncludingFlipping()), LayoutSize { inlineBox->size() } };
+    return { };
+}
+
 LayoutRect RenderBoxModelObject::borderBoxRectInContainer() const
 {
     auto boundingBoxOfFragments = [&]() -> IntRect {
@@ -1129,6 +1136,68 @@ LayoutRect RenderBoxModelObject::borderBoxRectInContainer() const
     };
 
     return boundingBoxOfFragments();
+}
+LayoutRect RenderBoxModelObject::visualOverflowRect() const
+{
+    if (auto* layout = LayoutIntegration::LineLayout::containing(*this)) {
+        if (!layoutBox()) {
+            // Repaint may be issued on subtrees during content mutation with newly inserted renderers.
+            ASSERT(needsLayout());
+            return { };
+        }
+        return layout->inkOverflowBoundingBoxRectFor(*this);
+    }
+
+    auto* firstInlineBox = firstLegacyInlineBoxFor(*this);
+    auto* lastInlineBox = lastLegacyInlineBoxFor(*this);
+    if (!firstInlineBox || !lastInlineBox)
+        return { };
+
+    // Return the width of the minimal left side and the maximal right side.
+    LayoutUnit logicalLeftSide = LayoutUnit::max();
+    LayoutUnit logicalRightSide = LayoutUnit::min();
+    for (auto* curr = firstInlineBox; curr; curr = curr->nextLineBox()) {
+        logicalLeftSide = std::min(logicalLeftSide, curr->logicalLeftVisualOverflow());
+        logicalRightSide = std::max(logicalRightSide, curr->logicalRightVisualOverflow());
+    }
+
+    const LegacyRootInlineBox& firstRootBox = firstInlineBox->root();
+    const LegacyRootInlineBox& lastRootBox = lastInlineBox->root();
+
+    LayoutUnit logicalTop = firstInlineBox->logicalTopVisualOverflow(firstRootBox.lineTop());
+    LayoutUnit logicalWidth = logicalRightSide - logicalLeftSide;
+    LayoutUnit logicalHeight = lastInlineBox->logicalBottomVisualOverflow(lastRootBox.lineBottom()) - logicalTop;
+
+    LayoutRect rect(logicalLeftSide, logicalTop, logicalWidth, logicalHeight);
+    if (!writingMode().isHorizontal())
+        rect = rect.transposedRect();
+    return rect;
+}
+
+Vector<FloatRect> RenderBoxModelObject::localBorderBoxRects() const
+{
+    if (auto* lineLayout = LayoutIntegration::LineLayout::containing(*this)) {
+        auto inlineBoxRects = lineLayout->collectInlineBoxRects(*this);
+        if (inlineBoxRects.isEmpty())
+            return { FloatRect { } };
+        return inlineBoxRects;
+    }
+
+    Vector<FloatRect> rects;
+    for (auto* box = firstLegacyInlineBoxFor(*this); box; box = box->nextLineBox())
+        rects.append(FloatRect { box->topLeft(), box->size() });
+    if (rects.isEmpty())
+        rects.append({ });
+    return rects;
+}
+
+void RenderBoxModelObject::boundingRects(Vector<LayoutRect>& rects, const LayoutPoint& accumulatedOffset) const
+{
+    for (auto rect : localBorderBoxRects()) {
+        auto adjustedRect = LayoutRect { rect };
+        adjustedRect.moveBy(accumulatedOffset);
+        rects.append(adjustedRect);
+    }
 }
 
 } // namespace WebCore

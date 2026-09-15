@@ -788,9 +788,9 @@ void RenderBox::setScrollPosition(const ScrollPosition& position, const ScrollPo
     scrollableArea->setScrollPosition(position, options);
 }
 
-void RenderBox::boundingRects(Vector<LayoutRect>& rects, const LayoutPoint& accumulatedOffset) const
+Vector<FloatRect> RenderBox::localBorderBoxRects() const
 {
-    rects.append({ accumulatedOffset, borderBoxSize() });
+    return { FloatRect { { }, borderBoxSize() } };
 }
 
 void RenderBox::absoluteQuads(Vector<FloatQuad>& quads, bool* wasFixed) const
@@ -2684,8 +2684,8 @@ LayoutSize RenderBox::offsetFromContainer(const RenderElement& container, const 
     if (auto* boxContainer = dynamicDowncast<RenderBox>(container))
         offset -= toLayoutSize(boxContainer->scrollPosition());
 
-    if (auto* inlineContainer = dynamicDowncast<RenderInline>(container); isAbsolutelyPositioned() && inlineContainer && inlineContainer->canContainAbsolutelyPositionedObjects())
-        offset += inlineContainer->offsetForInFlowPositionedInline(this);
+    if (isAbsolutelyPositioned() && container.isInlineBox() && container.canContainAbsolutelyPositionedObjects())
+        offset += PositionedLayoutConstraints::containingBlockOffsetForNonStaticAxes(downcast<RenderBoxModelObject>(container), style());
 
     if (offsetDependsOnPoint)
         *offsetDependsOnPoint |= is<RenderFragmentedFlow>(container);
@@ -2795,10 +2795,9 @@ auto RenderBox::computeVisibleRectsInContainer(const RepaintRects& rects, const 
 
     adjustedRects.move(locationOffset);
 
-    if (auto* inlineContainer = dynamicDowncast<RenderInline>(*localContainer); position == PositionType::Absolute && inlineContainer && inlineContainer->canContainAbsolutelyPositionedObjects()) {
-        auto offsetForInFlowPosition = inlineContainer->offsetForInFlowPositionedInline(this);
-        adjustedRects.move(offsetForInFlowPosition);
-    } else if (styleToUse.hasInFlowPosition() && layer()) {
+    if (position == PositionType::Absolute && localContainer->isInlineBox() && localContainer->canContainAbsolutelyPositionedObjects())
+        adjustedRects.move(PositionedLayoutConstraints::containingBlockOffsetForNonStaticAxes(downcast<RenderBoxModelObject>(*localContainer), styleToUse));
+    else if (styleToUse.hasInFlowPosition() && layer()) {
         // Apply the relative position offset when invalidating a rectangle.  The layer
         // is translated, but the render box isn't, so we need to do this to get the
         // right dirty rect.  Since this is called from RenderObject::setStyle, the relative position
@@ -3883,6 +3882,16 @@ template<typename SizeType> std::optional<LayoutUnit> RenderBox::computeContentA
         [&](const typename SizeType::Calc&) -> std::optional<LayoutUnit> {
             return computePercentageLogicalHeight(logicalHeight);
         },
+        [&](const typename SizeType::CalcSize& calcSize) -> std::optional<LayoutUnit> {
+            if (auto result = computePercentageLogicalHeight(logicalHeight))
+                return result;
+            // A percentage basis against an indefinite containing block leaves the function behaving
+            // as the basis does.
+            if (calcSize.basisHasPercentage())
+                return { };
+            // Percentages in the calculation resolve against zero when indefinite.
+            return Style::evaluate<LayoutUnit>(calcSize, 0_lu, style().usedZoomForLength());
+        },
         [&](const CSS::Keyword::MinContent&) -> std::optional<LayoutUnit> {
             return keywordSize();
         },
@@ -4112,6 +4121,11 @@ std::optional<LayoutUnit> RenderBox::computePercentageLogicalHeight(const Style:
 }
 
 std::optional<LayoutUnit> RenderBox::computePercentageLogicalHeight(const Style::UnevaluatedCalculation<CSS::LengthPercentage<CSS::NonnegativeLayoutUnitClamped, float>>& logicalHeight, UpdatePercentageHeightDescendants updateDescendants) const
+{
+    return computePercentageLogicalHeightGeneric(logicalHeight, updateDescendants);
+}
+
+std::optional<LayoutUnit> RenderBox::computePercentageLogicalHeight(const Style::UnevaluatedCalcSize& logicalHeight, UpdatePercentageHeightDescendants updateDescendants) const
 {
     return computePercentageLogicalHeightGeneric(logicalHeight, updateDescendants);
 }
@@ -4446,6 +4460,9 @@ template<typename SizeType> LayoutUnit RenderBox::computeOutOfFlowPositionedLogi
         },
         [&](const typename SizeType::Calc& calculatedLogicalWidth) -> LayoutUnit {
             return adjustContentBoxLogicalWidthForBoxSizing(Style::evaluate<LayoutUnit>(calculatedLogicalWidth, inlineConstraints.containingSize(), style().usedZoomForLength()));
+        },
+        [&](const typename SizeType::CalcSize& calcSizeLogicalWidth) -> LayoutUnit {
+            return adjustContentBoxLogicalWidthForBoxSizing(Style::evaluate<LayoutUnit>(calcSizeLogicalWidth, inlineConstraints.containingSize(), style().usedZoomForLength()));
         },
         [&](const CSS::Keyword::FitContent& keyword) -> LayoutUnit {
             return intrinsic(keyword);
@@ -5191,16 +5208,6 @@ LayoutRect RenderBox::flippedPaddingBoxRect() const
         rect.contract(verticalScrollbarWidth(), horizontalScrollbarHeight());
     }
     return rect;
-}
-
-LayoutUnit RenderBox::offsetLeft() const
-{
-    return adjustedPositionRelativeToOffsetParent(topLeftLocation()).x();
-}
-
-LayoutUnit RenderBox::offsetTop() const
-{
-    return adjustedPositionRelativeToOffsetParent(topLeftLocation()).y();
 }
 
 LayoutPoint RenderBox::flipForWritingModeForChild(const RenderBox& child, const LayoutPoint& point) const

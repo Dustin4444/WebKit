@@ -39,7 +39,6 @@ public:
     RenderInline(Type, Document&, Style::ComputedStyle&&);
     virtual ~RenderInline();
 
-    void boundingRects(Vector<LayoutRect>&, const LayoutPoint& accumulatedOffset) const final;
     void absoluteQuads(Vector<FloatQuad>&, bool* wasFixed) const override;
 
     LayoutSize offsetFromContainer(const RenderElement&, const LayoutPoint&, bool* offsetDependsOnPoint = nullptr) const final;
@@ -47,15 +46,8 @@ public:
     LayoutUnit innerPaddingBoxWidth() const;
     LayoutUnit innerPaddingBoxHeight() const;
 
-    LayoutRect linesVisualOverflowBoundingBox() const;
-
-    LayoutSize offsetForInFlowPositionedInline(const RenderBox* child) const;
-
-    void collectLineBoxRects(Vector<LayoutRect>&, const LayoutPoint& additionalOffset) const;
 
     bool requiresLayer() const override;
-
-    LayoutPoint firstInlineBoxTopLeft() const;
 
 protected:
     void styleDidChange(Style::Difference, const Style::ComputedStyle* oldStyle) override;
@@ -65,16 +57,12 @@ private:
 
     bool canHaveChildren() const final { return true; }
 
-    Vector<FloatRect> lineBoxRects() const;
-
     void layout() final { ASSERT_NOT_REACHED(); } // Do nothing for layout()
 
     void paint(PaintInfo&, const LayoutPoint&) final;
 
     bool nodeAtPoint(const HitTestRequest&, HitTestResult&, const HitTestLocation& locationInContainer, const LayoutPoint& accumulatedOffset, HitTestAction) final;
 
-    LayoutUnit offsetLeft() const final;
-    LayoutUnit offsetTop() const final;
     LayoutUnit offsetWidth() const final { return borderBoxRectInContainer().width(); }
     LayoutUnit offsetHeight() const final { return borderBoxRectInContainer().height(); }
 
